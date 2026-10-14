@@ -2,7 +2,7 @@ module github.com/gookit/rotatefile
 
 go 1.19
 
-require github.com/gookit/goutil v0.8.0
+require github.com/gookit/goutil v0.8.2
 
 require (
 	golang.org/x/sync v0.11.0 // indirect
