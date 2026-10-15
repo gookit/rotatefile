@@ -7,12 +7,14 @@
 
 `rotatefile` is a lightweight Go library for **log file rotation, cleanup and gzip compression**.
 
+> [中文说明](README.zh-CN.md) | English
+
 `rotatefile.Writer` is a plain `io.Writer`, so it drops into the standard library
 `log/slog`, the standard `log`, `zap`, [gookit/slog](https://github.com/gookit/slog) —
 any logger that writes to an `io.Writer`. The Go standard library has no built-in log
 rotation; this fills that gap.
 
-> 中文说明请看 [README.zh-CN.md](README.zh-CN.md)
+> 🪄 `rotatefile` is a package split from [gookit/slog](https://github.com/gookit/slog).
 
 ## Features
 

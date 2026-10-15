@@ -7,11 +7,13 @@
 
 `rotatefile` 是一个轻量的 Go 库,提供**日志文件轮转(切割)、清理与 gzip 压缩**。
 
+> 中文说明 | [English](README.md)
+
 `rotatefile.Writer` 就是一个普通的 `io.Writer`,因此可直接用于标准库 `log/slog`、
 标准库 `log`、`zap`、[gookit/slog](https://github.com/gookit/slog) —— 任何写入
 `io.Writer` 的日志库。Go 标准库本身没有内置日志轮转,这个库正好补上。
 
-> English instructions please see [README.md](README.md)
+> 🪄 `rotatefile` 是从 [gookit/slog](https://github.com/gookit/slog) 中拆分出来的包。
 
 ## 功能特色
 
