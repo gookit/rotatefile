@@ -1,6 +1,7 @@
 package rotatefile
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"math/rand"
@@ -58,6 +59,10 @@ type Writer struct {
 	// nextSizeSync is the written size at which the counter is next refreshed
 	// from the file itself (see syncWrittenSize).
 	nextSizeSync uint64
+	// rotateRetryAt holds size rotation back after a rename failed while the
+	// file kept being written (Windows refuses to rename a file other writers
+	// hold open): the next attempt waits until this much has been written.
+	rotateRetryAt uint64
 
 	// ---- context use for rotating file by time ----
 
@@ -188,8 +193,13 @@ func (d *Writer) Write(p []byte) (n int, err error) {
 		return
 	}
 
-	// do rotate file
+	// do rotate file. A rotation whose rename failed but left the file open
+	// for writing is not a write error: p is on disk and the rotation is
+	// retried later (see ErrRotateDeferred).
 	err = d.doRotate()
+	if errors.Is(err, ErrRotateDeferred) {
+		err = nil
+	}
 	// async clean backup files.
 	if err == nil && d.shouldClean(true) {
 		d.asyncClean()
@@ -236,7 +246,7 @@ func (d *Writer) doRotate() (err error) {
 		if d.written >= d.nextSizeSync {
 			d.syncWrittenSize()
 		}
-		if d.written >= d.cfg.MaxSize {
+		if d.written >= d.cfg.MaxSize && d.written >= d.rotateRetryAt {
 			if err = d.rotatingBySize(); err != nil {
 				return
 			}
@@ -323,6 +333,12 @@ func (d *Writer) rotatingBySize() error {
 	return d.rotatingFile(bakFile, true)
 }
 
+// ErrRotateDeferred reports a rotation whose rename failed while the current
+// file was reopened and stays writable (on Windows a file other writers hold
+// open cannot be renamed). Write treats it as success - the data is written and
+// the rotation is retried later; Rotate returns it.
+var ErrRotateDeferred = errors.New("rotatefile: rotation deferred, the file could not be renamed")
+
 // bakRenameMu serializes picking a rotated file name and renaming to it inside
 // one process, so two writers never rename onto the same name.
 var bakRenameMu sync.Mutex
@@ -366,7 +382,14 @@ func (d *Writer) rotatingFile(bakFile string, rename bool) error {
 			if os.IsNotExist(err) {
 				return nil
 			}
-			return err
+			// The file stays the current one: retry after another tenth of
+			// MaxSize instead of on every write.
+			step := d.cfg.MaxSize / 10
+			if step == 0 {
+				step = 1
+			}
+			d.rotateRetryAt = d.written + step
+			return fmt.Errorf("%w: %v", ErrRotateDeferred, err)
 		}
 	}
 
@@ -633,7 +656,7 @@ func (d *Writer) removeOldFiles(remNum int, oldFiles []fsutil.FileInfo) (files [
 
 // open the current file. and set the d.file, d.path
 func (d *Writer) openFile(logfile string) error {
-	file, err := fsutil.OpenFile(logfile, DefaultFileFlags, d.cfg.FilePerm)
+	file, err := openAppendFile(logfile, d.cfg.FilePerm)
 	if err != nil {
 		return err
 	}
@@ -651,6 +674,9 @@ func (d *Writer) openFile(logfile string) error {
 		d.written = uint64(fi.Size())
 	}
 	d.nextSizeSync = 0
+	// a newly opened file has no deferred rotation (the rename failure path
+	// sets it again right after reopening)
+	d.rotateRetryAt = 0
 	return nil
 }
 
