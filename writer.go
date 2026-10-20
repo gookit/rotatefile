@@ -55,6 +55,9 @@ type Writer struct {
 	// context use for rotating file by size
 	written   uint64 // written size
 	rotateNum uint   // rotate times number
+	// nextSizeSync is the written size at which the counter is next refreshed
+	// from the file itself (see syncWrittenSize).
+	nextSizeSync uint64
 
 	// ---- context use for rotating file by time ----
 
@@ -229,10 +232,14 @@ func (d *Writer) doRotate() (err error) {
 	}
 
 	// do rotate a file by size
-	if d.cfg.MaxSize > 0 && d.written >= d.cfg.MaxSize {
-		err = d.rotatingBySize()
-		if err != nil {
-			return
+	if d.cfg.MaxSize > 0 {
+		if d.written >= d.nextSizeSync {
+			d.syncWrittenSize()
+		}
+		if d.written >= d.cfg.MaxSize {
+			if err = d.rotatingBySize(); err != nil {
+				return
+			}
 		}
 	}
 
@@ -254,6 +261,11 @@ func (d *Writer) rotatingByTime() error {
 	// eg: /tmp/error.log => /tmp/error.20220423_1600.log
 	// file := d.cfg.Filepath + "." + d.nextRotatingAt.Format(d.suffixFormat)
 	file := d.buildFilePath(d.nextRotatingAt.Format(d.suffixFormat))
+	if d.cfg.RotateMode == ModeCreate {
+		// ModeCreate keeps every period in its own file: open the file of the
+		// period that starts now (like init does), nothing is renamed.
+		file = d.buildFilePath(now.Format(d.suffixFormat))
+	}
 	err := d.rotatingFile(file, false)
 
 	// calc and storage next rotating time
@@ -262,6 +274,16 @@ func (d *Writer) rotatingByTime() error {
 }
 
 func (d *Writer) rotatingBySize() error {
+	// Several processes may append to the same file. When another one has
+	// already rotated it, d.path names a new file: switch to it instead of
+	// renaming that fresh file away a second time.
+	if moved, err := d.pathMovedAway(); err == nil && moved {
+		if err := d.close(false); err != nil {
+			return err
+		}
+		return d.openFile(d.path)
+	}
+
 	d.rotateNum++
 	now := d.cfg.TimeClock.Now()
 	// up: use now minutes + seconds as rotate number
@@ -301,24 +323,63 @@ func (d *Writer) rotatingFile(bakFile string, rename bool) error {
 	// rename current to a new file.
 	if rename || d.cfg.RotateMode == ModeRename {
 		if err := os.Rename(d.path, bakFile); err != nil {
+			// The current file is already closed: reopen it, or every later
+			// write fails and the lines are lost. A file that no longer exists
+			// was rotated by another process sharing it - not an error, the
+			// reopen starts the new file.
+			if oerr := d.openFile(d.path); oerr != nil {
+				return errorx.Withf(oerr, "reopen %s after rename failed (%v)", d.path, err)
+			}
+			if os.IsNotExist(err) {
+				return nil
+			}
 			return err
 		}
 	}
 
-	// filepath for reopening
+	// filepath for reopening: ModeRename always writes Config.Filepath; ModeCreate
+	// reopens the same path after a size rotation (renamed away above) and opens
+	// bakFile, the new period's file, on a time rotation.
 	logfile := d.path
 	if d.cfg.RotateMode == ModeRename {
 		logfile = d.cfg.Filepath
+	} else if !rename {
+		logfile = bakFile
 	}
 
-	// reopen log file
-	if err := d.openFile(logfile); err != nil {
-		return err
-	}
+	// reopen log file (openFile sets written from its size)
+	return d.openFile(logfile)
+}
 
-	// reset written
-	d.written = 0
-	return nil
+// syncWrittenSize refreshes the written counter from the open file, so the
+// lines other processes appended to the same file count toward MaxSize too. It
+// runs every tenth of MaxSize written, not on every write.
+func (d *Writer) syncWrittenSize() {
+	if fi, err := d.file.Stat(); err == nil && uint64(fi.Size()) > d.written {
+		d.written = uint64(fi.Size())
+	}
+	step := d.cfg.MaxSize / 10
+	if step == 0 {
+		step = 1
+	}
+	d.nextSizeSync = d.written + step
+}
+
+// pathMovedAway reports whether d.path now names another file than the one
+// this writer holds open (another process rotated it).
+func (d *Writer) pathMovedAway() (bool, error) {
+	held, err := d.file.Stat()
+	if err != nil {
+		return false, err
+	}
+	cur, err := os.Stat(d.path)
+	if os.IsNotExist(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return !os.SameFile(held, cur), nil
 }
 
 //
@@ -548,6 +609,15 @@ func (d *Writer) openFile(logfile string) error {
 	d.path = logfile
 	d.pathMu.Unlock()
 	d.file = file
+
+	// An existing file is appended to: count what it already holds, so a
+	// restarted process (or one of several sharing the file) does not grow it
+	// past MaxSize.
+	d.written = 0
+	if fi, err := file.Stat(); err == nil {
+		d.written = uint64(fi.Size())
+	}
+	d.nextSizeSync = 0
 	return nil
 }
 
