@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -144,4 +145,34 @@ func TestWriter_renameFails_keepsWriting(t *testing.T) {
 	_, err = w.WriteString("after the failed rename\n")
 	assert.NoErr(t, err)
 	assert.StrContains(t, readAll(t, dir), "after the failed rename")
+}
+
+// Writers of one process sharing a file rotate at the same moment: the rotated
+// names used to collide (the rotate number repeats across writers) and
+// os.Rename replaced the other writer's rotated file, losing its lines.
+func TestWriter_concurrentWriters_loseNoLine(t *testing.T) {
+	for round := 0; round < 20; round++ {
+		dir := t.TempDir()
+		logfile := filepath.Join(dir, "app.log")
+		var wg sync.WaitGroup
+		for w := 0; w < 4; w++ {
+			wg.Add(1)
+			go func(w int) {
+				defer wg.Done()
+				wr, err := rotatefile.NewWriterWith(func(c *rotatefile.Config) {
+					c.Filepath = logfile
+					c.MaxSize = 2048
+					c.RotateMode = rotatefile.ModeCreate
+				})
+				assert.NoErr(t, err)
+				defer wr.MustClose()
+				for i := 0; i < 60; i++ {
+					_, err := wr.WriteString("w" + mathutil.String(w) + "-" + mathutil.String(i) + " " + strings.Repeat("y", 90) + "\n")
+					assert.NoErr(t, err)
+				}
+			}(w)
+		}
+		wg.Wait()
+		assert.Eq(t, 240, strings.Count(readAll(t, dir), "\n"), "round "+mathutil.String(round))
+	}
 }

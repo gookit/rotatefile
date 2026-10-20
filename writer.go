@@ -274,6 +274,11 @@ func (d *Writer) rotatingByTime() error {
 }
 
 func (d *Writer) rotatingBySize() error {
+	// The check below and the rename run under one process-wide lock (see
+	// bakRenameMu), so two writers of this process never both rename the file.
+	bakRenameMu.Lock()
+	defer bakRenameMu.Unlock()
+
 	// Several processes may append to the same file. When another one has
 	// already rotated it, d.path names a new file: switch to it instead of
 	// renaming that fresh file away a second time.
@@ -306,8 +311,36 @@ func (d *Writer) rotatingBySize() error {
 		bakFile = d.buildFilePath(fmt.Sprintf("%s_%d", now.Format("06010215"), rotateNum))
 	}
 
+	// Writers sharing one file can rotate at the same moment and build the same
+	// name (the number above is not unique: "%d%d%d" has no padding and a µs
+	// clock repeats across writers). os.Rename silently replaces an existing
+	// target, which deletes the other writer's rotated file, so the name is
+	// picked and renamed under one process-wide lock (taken above) and made
+	// unique against files another process created.
+	bakFile = uniqueBakPath(bakFile)
+
 	// always rename current to a new file
 	return d.rotatingFile(bakFile, true)
+}
+
+// bakRenameMu serializes picking a rotated file name and renaming to it inside
+// one process, so two writers never rename onto the same name.
+var bakRenameMu sync.Mutex
+
+// uniqueBakPath returns path, or path with "_1", "_2"... before the extension
+// when a file of that name already exists.
+func uniqueBakPath(path string) string {
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		return path
+	}
+	ext := filepath.Ext(path)
+	base := strings.TrimSuffix(path, ext)
+	for i := 1; ; i++ {
+		candidate := fmt.Sprintf("%s_%d%s", base, i, ext)
+		if _, err := os.Lstat(candidate); os.IsNotExist(err) {
+			return candidate
+		}
+	}
 }
 
 // rotateFile closes the syncBuffer's file and starts a new one.
