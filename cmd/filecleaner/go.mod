@@ -3,7 +3,7 @@ module github.com/gookit/rotatefile/cmd/filecleaner
 go 1.20
 
 require (
-	github.com/gookit/goutil v0.7.6
+	github.com/gookit/goutil v0.8.6
 	github.com/gookit/rotatefile v0.0.0
 )
 
